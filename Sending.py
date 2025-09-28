@@ -1,58 +1,56 @@
 import asyncio
-import sqlite3
+import aiosqlite
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, SuccessfulPaymentFilter
 from aiogram.types import (
-    LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+    LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, PreCheckoutQuery
 )
 
 # ---------- Настройки ----------
 TOKEN = "7615768301:AAGxhDTqCzI8-4lu0oo2v0cOFKS2_x1T-8o"
 ADMIN_ID = 6486579332
-PAYMENT_PROVIDER_TOKEN = ""  # пусто для Stars
-CURRENCY = "XTR"  # Telegram Stars
+PAYMENT_PROVIDER_TOKEN = ""   # пусто для Stars
+CURRENCY = "XTR"              # Telegram Stars
 # --------------------------------
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # --- База данных ---
-conn = sqlite3.connect("students.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS students (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    language_code TEXT,
-    is_premium INTEGER
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    message TEXT,
-    date TEXT,
-    type TEXT
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS donations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    amount INTEGER,
-    currency TEXT,
-    date TEXT,
-    payload TEXT
-)
-""")
-conn.commit()
+async def init_db():
+    async with aiosqlite.connect("students.db") as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS students (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            language_code TEXT,
+            is_premium INTEGER
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message TEXT,
+            date TEXT,
+            type TEXT
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS donations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            currency TEXT,
+            date TEXT,
+            payload TEXT
+        )
+        """)
+        await db.commit()
 
 # --- Быстрое меню ---
 main_menu = ReplyKeyboardMarkup(
@@ -113,7 +111,7 @@ async def myid(message: types.Message):
         parse_mode="Markdown"
     )
 
-# --- DONATE (меню выбора) ---
+# --- DONATE ---
 @dp.message(Command("donate"))
 async def donate_cmd(message: types.Message):
     kb = InlineKeyboardMarkup(
@@ -125,7 +123,6 @@ async def donate_cmd(message: types.Message):
     )
     await message.answer("Выберите сумму поддержки:", reply_markup=kb)
 
-# --- Обработка выбора суммы ---
 @dp.callback_query(F.data.startswith("donate_"))
 async def donate_callback(callback: types.CallbackQuery):
     stars = int(callback.data.split("_")[1])
@@ -146,20 +143,21 @@ async def donate_callback(callback: types.CallbackQuery):
 
 # --- Pre-checkout ---
 @dp.pre_checkout_query()
-async def pre_checkout(pre_checkout_q: types.PreCheckoutQuery):
+async def pre_checkout(pre_checkout_q: PreCheckoutQuery, bot: Bot):
     await bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
 
 # --- Успешная оплата ---
-@dp.message(F.successful_payment)
+@dp.message(SuccessfulPaymentFilter())
 async def got_payment(message: types.Message):
     pay = message.successful_payment
     user = message.from_user
 
-    cursor.execute(
-        "INSERT INTO donations (user_id, amount, currency, date, payload) VALUES (?, ?, ?, ?, ?)",
-        (user.id, pay.total_amount, pay.currency, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pay.invoice_payload)
-    )
-    conn.commit()
+    async with aiosqlite.connect("students.db") as db:
+        await db.execute(
+            "INSERT INTO donations (user_id, amount, currency, date, payload) VALUES (?, ?, ?, ?, ?)",
+            (user.id, pay.total_amount, pay.currency, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pay.invoice_payload)
+        )
+        await db.commit()
 
     await message.answer("✅ Спасибо за поддержку! ❤️")
     await bot.send_message(
@@ -177,14 +175,15 @@ async def letter(message: types.Message):
         return await message.answer("❌ Напиши так: /letter текст")
 
     user = message.from_user
-    cursor.execute("INSERT INTO messages (user_id, message, date, type) VALUES (?, ?, ?, ?)",
-                   (user.id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "letter"))
-    conn.commit()
+    async with aiosqlite.connect("students.db") as db:
+        await db.execute("INSERT INTO messages (user_id, message, date, type) VALUES (?, ?, ?, ?)",
+                         (user.id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "letter"))
+        await db.commit()
 
     await message.answer("✅ Письмо отправлено админу!")
     await bot.send_message(ADMIN_ID, f"📨 Письмо от @{user.username or 'Без ника'} ({user.id}):\n{text}")
 
-# --- REPLY (только для админа) ---
+# --- REPLY ---
 @dp.message(Command("reply"))
 async def reply(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -222,22 +221,21 @@ async def forward_msg(message: types.Message):
         return
 
     user = message.from_user
-    cursor.execute("""
-    INSERT OR REPLACE INTO students (user_id, username, first_name, last_name, language_code, is_premium)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        user.username,
-        user.first_name,
-        user.last_name,
-        user.language_code,
-        1 if getattr(user, "is_premium", False) else 0
-    ))
-    conn.commit()
-
-    cursor.execute("INSERT INTO messages (user_id, message, date, type) VALUES (?, ?, ?, ?)",
-                   (user.id, message.text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message"))
-    conn.commit()
+    async with aiosqlite.connect("students.db") as db:
+        await db.execute("""
+        INSERT OR REPLACE INTO students (user_id, username, first_name, last_name, language_code, is_premium)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+            user.language_code,
+            1 if getattr(user, "is_premium", False) else 0
+        ))
+        await db.execute("INSERT INTO messages (user_id, message, date, type) VALUES (?, ?, ?, ?)",
+                         (user.id, message.text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message"))
+        await db.commit()
 
     await bot.send_message(
         ADMIN_ID,
@@ -246,6 +244,7 @@ async def forward_msg(message: types.Message):
 
 # --- Запуск ---
 async def main():
+    await init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
