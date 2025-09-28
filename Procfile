@@ -1,1 +1,1 @@
-worker: python Sending.py
+worker: python bot.py
