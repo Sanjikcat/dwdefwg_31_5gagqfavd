@@ -83,6 +83,38 @@ async def start(message: types.Message):
         reply_markup=main_menu
     )
 
+# ---------- HELP ----------
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
+    await message.answer(
+        "🆘 Помощь:\n\n"
+        "/start — главное меню\n"
+        "/help — справка\n"
+        "/privacy — политика конфиденциальности\n"
+        "/myid — ваш Telegram ID\n"
+        "/letter текст — написать админу"
+    )
+
+# ---------- PRIVACY ----------
+@dp.message(Command("privacy"))
+async def privacy(message: types.Message):
+    await message.answer(
+        "🔐 Политика конфиденциальности:\n"
+        "1) Сохраняем ваш Telegram ID, имя и сообщения.\n"
+        "2) Данные не передаются третьим лицам.\n"
+        "3) Для удаления напишите /letter."
+    )
+
+# ---------- MYID ----------
+@dp.message(Command("myid"))
+async def myid(message: types.Message):
+    user = message.from_user
+    await message.answer(
+        f"🆔 Ваш Telegram ID: `{user.id}`\n"
+        f"👤 Username: @{user.username or 'нет'}",
+        parse_mode="Markdown"
+    )
+
 # ---------- LETTER ----------
 @dp.message(Command("letter"))
 async def letter(message: types.Message):
@@ -91,7 +123,6 @@ async def letter(message: types.Message):
         return await message.answer("❌ Напиши так: /letter текст")
 
     user = message.from_user
-
     execute_query(
         "INSERT INTO messages (user_id, message, date, type) VALUES (%s, %s, %s, %s)",
         (user.id, text, datetime.now(), "letter"),
@@ -101,15 +132,31 @@ async def letter(message: types.Message):
     await message.answer("✅ Письмо отправлено админу!")
     await bot.send_message(ADMIN_ID, f"📨 Письмо от @{user.username or 'Без ника'} ({user.id}):\n{text}")
 
-# ---------- Сообщения ----------
+# ---------- REPLY (только админ) ----------
+@dp.message(Command("reply"))
+async def reply(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("⛔ У вас нет прав использовать эту команду.")
+
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer("Используй: /reply user_id текст")
+
+    user_id, text = int(args[1]), args[2]
+    try:
+        await bot.send_message(user_id, f"📩 Ответ от администрации:\n\n{text}")
+        await message.answer("✅ Ответ отправлен")
+    except:
+        await message.answer("⚠ Не удалось отправить сообщение")
+
+# ---------- ОБЩИЙ ХЭНДЛЕР (последний!) ----------
 @dp.message(F.text)
 async def forward_msg(message: types.Message):
     if message.text.startswith("/"):
-        return
+        return  # команды не трогаем
 
     user = message.from_user
 
-    # сохраняем/обновляем студента
     execute_query("""
     INSERT INTO students (user_id, username, first_name, last_name, language_code, is_premium)
     VALUES (%s, %s, %s, %s, %s, %s)
@@ -128,7 +175,6 @@ async def forward_msg(message: types.Message):
         1 if getattr(user, "is_premium", False) else 0
     ), commit=True)
 
-    # сохраняем сообщение
     execute_query(
         "INSERT INTO messages (user_id, message, date, type) VALUES (%s, %s, %s, %s)",
         (user.id, message.text, datetime.now(), "message"),
